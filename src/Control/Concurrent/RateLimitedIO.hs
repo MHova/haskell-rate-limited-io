@@ -8,6 +8,7 @@
 module Control.Concurrent.RateLimitedIO (
   newRateManager,
   perform,
+  performWith,
   Result(..),
   RateManager
 ) where
@@ -55,6 +56,10 @@ newRateManager = do
   anything except `HitLimit`. Throwing an exception counts as "success"
   in this case).
 
+  The job that's executed in each retry is created from the
+  client-provided `mkNextJob` function, which accepts the result of the previous
+  HitLimit as an input.
+
   The idea is that the oldest throttled job must complete before any other jobs
   (throttled or not) are allowed to start. Because of concurrency, "oldest" in
   this case means when we discovered the job was throttled, not when it was
@@ -63,17 +68,26 @@ newRateManager = do
   If there are no jobs that have been throttled, then it is a
   free-for-all. All jobs are executed immediately.
 -}
-perform ::
+performWith ::
      RateManager
+  -> (b -> IO (Result a b))
   -> IO (Result a b)
   -> IO a
-perform R {countT, throttledT} job = do
+performWith R {countT, throttledT} mkNextJob job = do
   jobId <- atomically $ do
     c <- readTVar countT
     writeTVar countT (c + 1)
     return c
-  performJob throttledT jobId (const job) job
+  performJob throttledT jobId mkNextJob job
 
+{- |
+  The same as `performWith`, but the original job is retried each time.
+-}
+perform ::
+     RateManager
+  -> IO (Result a b)
+  -> IO a
+perform r job = performWith r (const job) job
 
 performJob ::
      TVar [Int]
