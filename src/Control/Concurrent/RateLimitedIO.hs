@@ -63,7 +63,10 @@ newRateManager = do
   If there are no jobs that have been throttled, then it is a
   free-for-all. All jobs are executed immediately.
 -}
-perform :: RateManager -> IO (Result a b) -> IO a
+perform ::
+     RateManager
+  -> IO (Result a b)
+  -> IO a
 perform R {countT, throttledT} job = do
   jobId <- atomically $ do
     c <- readTVar countT
@@ -72,7 +75,11 @@ perform R {countT, throttledT} job = do
   performJob throttledT jobId job
 
 
-performJob :: TVar [Int] -> Int -> IO (Result a b) -> IO a
+performJob ::
+     TVar [Int]
+  -> Int
+  -> IO (Result a b)
+  -> IO a
 performJob throttledT jobId job =
   join . atomically $ do
     throttled <- readTVar throttledT
