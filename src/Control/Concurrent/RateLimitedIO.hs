@@ -85,7 +85,7 @@ performWith R {countT, throttledT} mkNextJob job = do
 -}
 perform ::
      RateManager
-  -> IO (Result a b)
+  -> IO (Result a ())
   -> IO a
 perform r job = performWith r (const job) job
 
