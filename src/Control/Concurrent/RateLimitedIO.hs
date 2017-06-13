@@ -72,22 +72,23 @@ perform R {countT, throttledT} job = do
     c <- readTVar countT
     writeTVar countT (c + 1)
     return c
-  performJob throttledT jobId job
+  performJob throttledT jobId (const job) job
 
 
 performJob ::
      TVar [Int]
   -> Int
+  -> (b -> IO (Result a b))
   -> IO (Result a b)
   -> IO a
-performJob throttledT jobId job =
+performJob throttledT jobId mkNextJob job =
   join . atomically $ do
     throttled <- readTVar throttledT
     case throttled of
       [] -> return tryJob -- full speed ahead.
       first:_ | first == jobId ->
         -- we are first in line
-        return (untilSuccess 0 `finally` pop)
+        return (untilSuccess 0 job `finally` pop)
       _ ->
         -- we must wait
         retry
@@ -96,16 +97,17 @@ performJob throttledT jobId job =
       result <- job
       case result of
         Ok val -> return val
-        HitLimit _ -> do
+        HitLimit limitResponse -> do
           atomically $ modifyTVar throttledT (++ [jobId])
-          performJob throttledT jobId job
+          performJob throttledT jobId mkNextJob (mkNextJob limitResponse)
 
-    untilSuccess backoff = do
+    untilSuccess backoff job' = do
       threadDelay (time backoff)
-      result <- job
+      result <- job'
       case result of
         Ok val -> return val
-        HitLimit _ -> untilSuccess (newBackoff backoff)
+        HitLimit limitResponse -> untilSuccess (newBackoff backoff)
+          (mkNextJob limitResponse)
 
     newBackoff backoff
       | backoff > 10 = backoff -- don't go crazy with the backoff.
