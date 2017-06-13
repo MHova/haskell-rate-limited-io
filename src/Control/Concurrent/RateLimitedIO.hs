@@ -26,7 +26,7 @@ import Data.List (delete)
   Jobs to be executed must return a Result, indicating either successful
   completion or an operation that hit the rate limit.
 -}
-data Result a = HitLimit | Ok a
+data Result a b = Ok a | HitLimit b
 
 
 {- |
@@ -48,7 +48,6 @@ newRateManager = do
   throttledT <- atomically (newTVar [])
   return R {countT, throttledT}
 
-
 {- |
   Perform a job in the context of the `RateManager`. The job blocks
   until the rate limit logic says it can go. If the job gets throttled,
@@ -64,7 +63,7 @@ newRateManager = do
   If there are no jobs that have been throttled, then it is a
   free-for-all. All jobs are executed immediately.
 -}
-perform :: RateManager -> IO (Result a) -> IO a
+perform :: RateManager -> IO (Result a b) -> IO a
 perform R {countT, throttledT} job = do
   jobId <- atomically $ do
     c <- readTVar countT
@@ -73,14 +72,14 @@ perform R {countT, throttledT} job = do
   performJob throttledT jobId job
 
 
-performJob :: TVar [Int] -> Int -> IO (Result a) -> IO a
+performJob :: TVar [Int] -> Int -> IO (Result a b) -> IO a
 performJob throttledT jobId job =
   join . atomically $ do
     throttled <- readTVar throttledT
     case throttled of
       [] -> return tryJob -- full speed ahead.
       first:_ | first == jobId ->
-        -- we are fist in line
+        -- we are first in line
         return (untilSuccess 0 `finally` pop)
       _ ->
         -- we must wait
@@ -90,7 +89,7 @@ performJob throttledT jobId job =
       result <- job
       case result of
         Ok val -> return val
-        HitLimit -> do
+        HitLimit _ -> do
           atomically $ modifyTVar throttledT (++ [jobId])
           performJob throttledT jobId job
 
@@ -99,7 +98,7 @@ performJob throttledT jobId job =
       result <- job
       case result of
         Ok val -> return val
-        HitLimit -> untilSuccess (newBackoff backoff)
+        HitLimit _ -> untilSuccess (newBackoff backoff)
 
     newBackoff backoff
       | backoff > 10 = backoff -- don't go crazy with the backoff.
