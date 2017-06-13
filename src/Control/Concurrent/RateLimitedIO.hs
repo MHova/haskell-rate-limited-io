@@ -8,6 +8,7 @@
 module Control.Concurrent.RateLimitedIO (
   newRateManager,
   perform,
+  performWith,
   Result(..),
   RateManager
 ) where
@@ -26,7 +27,7 @@ import Data.List (delete)
   Jobs to be executed must return a Result, indicating either successful
   completion or an operation that hit the rate limit.
 -}
-data Result a = HitLimit | Ok a
+data Result a b = Ok a | HitLimit b
 
 
 {- |
@@ -48,13 +49,16 @@ newRateManager = do
   throttledT <- atomically (newTVar [])
   return R {countT, throttledT}
 
-
 {- |
   Perform a job in the context of the `RateManager`. The job blocks
   until the rate limit logic says it can go. If the job gets throttled,
   then it re-tries until it is successful (where "successful" means
   anything except `HitLimit`. Throwing an exception counts as "success"
   in this case).
+
+  The job that's executed in each retry is created from the
+  client-provided `mkNextJob` function, which accepts the result of the previous
+  HitLimit as an input.
 
   The idea is that the oldest throttled job must complete before any other jobs
   (throttled or not) are allowed to start. Because of concurrency, "oldest" in
@@ -64,24 +68,41 @@ newRateManager = do
   If there are no jobs that have been throttled, then it is a
   free-for-all. All jobs are executed immediately.
 -}
-perform :: RateManager -> IO (Result a) -> IO a
-perform R {countT, throttledT} job = do
+performWith ::
+     RateManager
+  -> (b -> IO (Result a b))
+  -> IO (Result a b)
+  -> IO a
+performWith R {countT, throttledT} mkNextJob job = do
   jobId <- atomically $ do
     c <- readTVar countT
     writeTVar countT (c + 1)
     return c
-  performJob throttledT jobId job
+  performJob throttledT jobId mkNextJob job
 
+{- |
+  The same as `performWith`, but the original job is retried each time.
+-}
+perform ::
+     RateManager
+  -> IO (Result a ())
+  -> IO a
+perform r job = performWith r (const job) job
 
-performJob :: TVar [Int] -> Int -> IO (Result a) -> IO a
-performJob throttledT jobId job =
+performJob ::
+     TVar [Int]
+  -> Int
+  -> (b -> IO (Result a b))
+  -> IO (Result a b)
+  -> IO a
+performJob throttledT jobId mkNextJob job =
   join . atomically $ do
     throttled <- readTVar throttledT
     case throttled of
       [] -> return tryJob -- full speed ahead.
       first:_ | first == jobId ->
-        -- we are fist in line
-        return (untilSuccess 0 `finally` pop)
+        -- we are first in line
+        return (untilSuccess 0 job `finally` pop)
       _ ->
         -- we must wait
         retry
@@ -90,16 +111,17 @@ performJob throttledT jobId job =
       result <- job
       case result of
         Ok val -> return val
-        HitLimit -> do
+        HitLimit limitResponse -> do
           atomically $ modifyTVar throttledT (++ [jobId])
-          performJob throttledT jobId job
+          performJob throttledT jobId mkNextJob (mkNextJob limitResponse)
 
-    untilSuccess backoff = do
+    untilSuccess backoff job' = do
       threadDelay (time backoff)
-      result <- job
+      result <- job'
       case result of
         Ok val -> return val
-        HitLimit -> untilSuccess (newBackoff backoff)
+        HitLimit limitResponse -> untilSuccess (newBackoff backoff)
+          (mkNextJob limitResponse)
 
     newBackoff backoff
       | backoff > 10 = backoff -- don't go crazy with the backoff.
