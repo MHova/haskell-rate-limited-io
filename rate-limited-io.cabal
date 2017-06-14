@@ -2,7 +2,7 @@
 -- documentation, see http://haskell.org/cabal/users-guide/
 
 name:                rate-limited-io
-version:             0.2.0.0
+version:             0.2.0.1
 synopsis:
   A library that facilitates graceful handling of IO actions which are rate limited by some external party (e.g. connecting to the Twitter api).    
 description:         
@@ -24,7 +24,7 @@ library
   -- other-modules:       
   -- other-extensions:    
   build-depends:
-    base,
+    base < 4.10,
     stm
   hs-source-dirs:      src
   default-language:    Haskell2010
