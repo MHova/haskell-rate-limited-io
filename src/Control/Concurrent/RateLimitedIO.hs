@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {- |
   This module provides some basic logic to deal with rate limited IO actions
@@ -18,8 +19,10 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.STM (atomically, retry)
 import Control.Concurrent.STM.TVar (TVar, newTVar, readTVar, writeTVar,
   modifyTVar)
-import Control.Exception (finally)
+import Control.Exception.Lifted (finally)
 import Control.Monad (join)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Trans.Control (MonadBaseControl)
 import Data.List (delete)
 
 
@@ -69,12 +72,13 @@ newRateManager = do
   free-for-all. All jobs are executed immediately.
 -}
 performWith ::
-     RateManager
-  -> (b -> IO (Result a b))
-  -> IO (Result a b)
-  -> IO a
+     (MonadIO m, MonadBaseControl IO m)
+  => RateManager
+  -> (b -> m (Result a b))
+  -> m (Result a b)
+  -> m a
 performWith R {countT, throttledT} mkNextJob job = do
-  jobId <- atomically $ do
+  jobId <- liftIO . atomically $ do
     c <- readTVar countT
     writeTVar countT (c + 1)
     return c
@@ -84,19 +88,21 @@ performWith R {countT, throttledT} mkNextJob job = do
   The same as `performWith`, but the original job is retried each time.
 -}
 perform ::
-     RateManager
-  -> IO (Result a ())
-  -> IO a
+     (MonadIO m, MonadBaseControl IO m)
+  => RateManager
+  -> m (Result a ())
+  -> m a
 perform r job = performWith r (const job) job
 
 performJob ::
-     TVar [Int]
+     (MonadIO m, MonadBaseControl IO m)
+  => TVar [Int]
   -> Int
-  -> (b -> IO (Result a b))
-  -> IO (Result a b)
-  -> IO a
+  -> (b -> m (Result a b))
+  -> m (Result a b)
+  -> m a
 performJob throttledT jobId mkNextJob job =
-  join . atomically $ do
+  join . liftIO . atomically $ do
     throttled <- readTVar throttledT
     case throttled of
       [] -> return tryJob -- full speed ahead.
@@ -112,11 +118,11 @@ performJob throttledT jobId mkNextJob job =
       case result of
         Ok val -> return val
         HitLimit limitResponse -> do
-          atomically $ modifyTVar throttledT (++ [jobId])
+          liftIO . atomically $ modifyTVar throttledT (++ [jobId])
           performJob throttledT jobId mkNextJob (mkNextJob limitResponse)
 
     untilSuccess backoff job' = do
-      threadDelay (time backoff)
+      liftIO $ threadDelay (time backoff)
       result <- job'
       case result of
         Ok val -> return val
@@ -127,10 +133,8 @@ performJob throttledT jobId mkNextJob job =
       | backoff > 10 = backoff -- don't go crazy with the backoff.
       | otherwise = backoff + 1
 
-    pop = atomically $ modifyTVar throttledT (delete jobId)
+    pop = liftIO . atomically $ modifyTVar throttledT (delete jobId)
 
     -- | the time in microseconds of the backoff value (which is an exponent)
     time :: Int -> Int
     time backoff = 10000 * ((2 ^ backoff) - 1)
-
-
