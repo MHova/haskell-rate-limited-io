@@ -124,7 +124,7 @@ performJob throttledT jobId mkNextJob job =
           (mkNextJob limitResponse)
 
     newBackoff backoff
-      | backoff > 10 = backoff -- don't go crazy with the backoff.
+      | backoff >= maxBackoff = backoff -- don't go crazy with the backoff.
       | otherwise = backoff + 1
 
     pop = atomically $ modifyTVar throttledT (delete jobId)
@@ -133,4 +133,32 @@ performJob throttledT jobId mkNextJob job =
     time :: Int -> Int
     time backoff = 10000 * ((2 ^ backoff) - 1)
 
+maxBackoff :: Int
+maxBackoff = 19
 
+{- |
+  backoff   time
+  -------  -------
+     0       0.0 (seconds)
+     1      0.01
+     2      0.03
+     3      0.07
+     4      0.15
+     5      0.31
+     6      0.63
+     7      1.27
+     8      2.55
+     9      5.11
+    10     10.23
+    11     20.47
+    12     40.95
+
+    13      1.36 (minutes)
+    14      2.73
+    15      5.46
+    16     10.92
+    17     21.84
+    18     43.69
+
+    19      1.45 (hours)
+-}
