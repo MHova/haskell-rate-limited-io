@@ -9,6 +9,7 @@ module Control.Concurrent.RateLimitedIO (
   newRateManager,
   perform,
   performWith,
+  performWithMaxBackoff,
   Result(..),
   RateManager
 ) where
@@ -28,6 +29,44 @@ import Data.List (delete)
   completion or an operation that hit the rate limit.
 -}
 data Result a b = Ok a | HitLimit b
+
+
+-- | the time in microseconds of the backoff value (which is an exponent)
+time :: Int -> Int
+time backoff = 10000 * ((2 ^ backoff) - 1)
+
+{- |
+  We default the maximum backoff exponent to 11, which translates to a 20.47
+  second delay. Specifying a higher maximum is useful for platforms that
+  enforce a long waiting-period when a rate-limit is exceeded.
+
+  backoff   time
+  -------  -------
+     0       0.0 (seconds)
+     1      0.01
+     2      0.03
+     3      0.07
+     4      0.15
+     5      0.31
+     6      0.63
+     7      1.27
+     8      2.55
+     9      5.11
+    10     10.23
+    11     20.47
+    12     40.95
+
+    13      1.36 (minutes)
+    14      2.73
+    15      5.46
+    16     10.92
+    17     21.84
+    18     43.69
+
+    19      1.45 (hours)
+-}
+defaultMaxBackoff :: Int
+defaultMaxBackoff = 11
 
 
 {- |
@@ -73,12 +112,20 @@ performWith ::
   -> (b -> IO (Result a b))
   -> IO (Result a b)
   -> IO a
-performWith R {countT, throttledT} mkNextJob job = do
+performWith = performWithMaxBackoff defaultMaxBackoff
+
+performWithMaxBackoff ::
+     Int
+  -> RateManager
+  -> (b -> IO (Result a b))
+  -> IO (Result a b)
+  -> IO a
+performWithMaxBackoff maxBackoff R {countT, throttledT} mkNextJob job = do
   jobId <- atomically $ do
     c <- readTVar countT
     writeTVar countT (c + 1)
     return c
-  performJob throttledT jobId mkNextJob job
+  performJob throttledT jobId mkNextJob job maxBackoff
 
 {- |
   The same as `performWith`, but the original job is retried each time.
@@ -94,8 +141,9 @@ performJob ::
   -> Int
   -> (b -> IO (Result a b))
   -> IO (Result a b)
+  -> Int
   -> IO a
-performJob throttledT jobId mkNextJob job =
+performJob throttledT jobId mkNextJob job maxBackoff =
   join . atomically $ do
     throttled <- readTVar throttledT
     case throttled of
@@ -113,7 +161,7 @@ performJob throttledT jobId mkNextJob job =
         Ok val -> return val
         HitLimit limitResponse -> do
           atomically $ modifyTVar throttledT (++ [jobId])
-          performJob throttledT jobId mkNextJob (mkNextJob limitResponse)
+          performJob throttledT jobId mkNextJob (mkNextJob limitResponse) maxBackoff
 
     untilSuccess backoff job' = do
       threadDelay (time backoff)
@@ -124,13 +172,7 @@ performJob throttledT jobId mkNextJob job =
           (mkNextJob limitResponse)
 
     newBackoff backoff
-      | backoff > 10 = backoff -- don't go crazy with the backoff.
+      | backoff >= maxBackoff = backoff -- don't go crazy with the backoff.
       | otherwise = backoff + 1
 
     pop = atomically $ modifyTVar throttledT (delete jobId)
-
-    -- | the time in microseconds of the backoff value (which is an exponent)
-    time :: Int -> Int
-    time backoff = 10000 * ((2 ^ backoff) - 1)
-
-
