@@ -113,7 +113,7 @@ newRateManager = do
   job to try. If the first element of the tuple is 'Nothing', then the
   job will be re-tried using an internally computed backoff
   timeout. If the first element of the tuple is 'Just Int', the 'Int'
-  specifies explicitly the number of seconds to timeout before trying
+  specifies explicitly the number of milliseconds to timeout before trying
   the new job.
 -}
 performWith ::
@@ -180,14 +180,12 @@ performJob throttledT jobId mkNextJob maxBackoff timeout job =
     untilSuccess backoff timeout' job' = do
       case timeout' of
         Nothing -> threadDelay (time backoff)
-        Just seconds -> threadDelay (oneMillion * seconds)
+        Just milliSeconds -> threadDelay (1000 * milliSeconds)
       result <- job'
       case result of
         Ok val -> return val
         HitLimit limitResponse ->
           uncurry (untilSuccess $ newBackoff backoff) (mkNextJob limitResponse)
-
-    oneMillion = 1000000
 
     newBackoff backoff
       | backoff >= maxBackoff = backoff -- don't go crazy with the backoff.
