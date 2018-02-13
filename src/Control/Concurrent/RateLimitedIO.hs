@@ -22,6 +22,7 @@ import Control.Concurrent.STM.TVar (TVar, newTVar, readTVar, writeTVar,
 import Control.Exception (finally)
 import Control.Monad (join)
 import Data.List (delete)
+import Data.Maybe (maybe)
 
 
 {- |
@@ -106,10 +107,18 @@ newRateManager = do
 
   If there are no jobs that have been throttled, then it is a
   free-for-all. All jobs are executed immediately.
+
+  The 'mkNextJob' argument is responsible for returning a tuple that
+  both controls how the timeout is computed, and also specifies a new
+  job to try. If the first element of the tuple is 'Nothing', then the
+  job will be re-tried using an internally computed backoff
+  timeout. If the first element of the tuple is 'Just Int', the 'Int'
+  specifies explicitly the number of milliseconds to timeout before trying
+  the new job.
 -}
 performWith ::
      RateManager
-  -> (b -> IO (Result a b))
+  -> (b -> (Maybe Int, IO (Result a b)))
   -> IO (Result a b)
   -> IO a
 performWith = performWithMaxBackoff defaultMaxBackoff
@@ -117,15 +126,18 @@ performWith = performWithMaxBackoff defaultMaxBackoff
 performWithMaxBackoff ::
      Int
   -> RateManager
-  -> (b -> IO (Result a b))
+  -> (b -> (Maybe Int, IO (Result a b)))
   -> IO (Result a b)
   -> IO a
 performWithMaxBackoff maxBackoff R {countT, throttledT} mkNextJob job = do
-  jobId <- atomically $ do
-    c <- readTVar countT
-    writeTVar countT (c + 1)
-    return c
-  performJob throttledT jobId mkNextJob job maxBackoff
+  jobId <- freshJobId countT
+  performJob throttledT jobId mkNextJob maxBackoff Nothing job
+
+freshJobId :: TVar Int -> IO Int
+freshJobId countT = atomically $ do
+  c <- readTVar countT
+  writeTVar countT (c + 1)
+  return c
 
 {- |
   The same as `performWith`, but the original job is retried each time.
@@ -134,23 +146,24 @@ perform ::
      RateManager
   -> IO (Result a ())
   -> IO a
-perform r job = performWith r (const job) job
+perform r job = performWith r (const (Nothing, job)) job
 
 performJob ::
      TVar [Int]
   -> Int
-  -> (b -> IO (Result a b))
-  -> IO (Result a b)
+  -> (b -> (Maybe Int, IO (Result a b)))
   -> Int
+  -> Maybe Int
+  -> IO (Result a b)
   -> IO a
-performJob throttledT jobId mkNextJob job maxBackoff =
+performJob throttledT jobId mkNextJob maxBackoff timeout job =
   join . atomically $ do
     throttled <- readTVar throttledT
     case throttled of
       [] -> return tryJob -- full speed ahead.
       first:_ | first == jobId ->
         -- we are first in line
-        return (untilSuccess 0 job `finally` pop)
+        return (untilSuccess 0 timeout job `finally` pop)
       _ ->
         -- we must wait
         retry
@@ -161,15 +174,18 @@ performJob throttledT jobId mkNextJob job maxBackoff =
         Ok val -> return val
         HitLimit limitResponse -> do
           atomically $ modifyTVar throttledT (++ [jobId])
-          performJob throttledT jobId mkNextJob (mkNextJob limitResponse) maxBackoff
+          uncurry (performJob throttledT jobId mkNextJob maxBackoff) $
+            mkNextJob limitResponse
 
-    untilSuccess backoff job' = do
-      threadDelay (time backoff)
+    untilSuccess backoff timeout' job' = do
+      case timeout' of
+        Nothing -> threadDelay (time backoff)
+        Just milliSeconds -> threadDelay (1000 * milliSeconds)
       result <- job'
       case result of
         Ok val -> return val
-        HitLimit limitResponse -> untilSuccess (newBackoff backoff)
-          (mkNextJob limitResponse)
+        HitLimit limitResponse ->
+          uncurry (untilSuccess $ newBackoff backoff) (mkNextJob limitResponse)
 
     newBackoff backoff
       | backoff >= maxBackoff = backoff -- don't go crazy with the backoff.
