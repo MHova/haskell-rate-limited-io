@@ -22,7 +22,6 @@ import Control.Concurrent.STM.TVar (TVar, newTVar, readTVar, writeTVar,
 import Control.Exception (finally)
 import Control.Monad (join)
 import Data.List (delete)
-import Data.Maybe (maybe)
 
 
 {- |
