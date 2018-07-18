@@ -21,7 +21,7 @@ import Control.Concurrent.STM.TVar (TVar, newTVar, readTVar, writeTVar,
   modifyTVar)
 import Control.Exception (finally)
 import Control.Monad (join)
-import Data.Default (Default, def)
+import Data.Default.Class (Default, def)
 import Data.List (delete)
 
 
