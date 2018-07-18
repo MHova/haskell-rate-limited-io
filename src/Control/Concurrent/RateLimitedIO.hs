@@ -9,9 +9,9 @@ module Control.Concurrent.RateLimitedIO (
   newRateManager,
   perform,
   performWith,
-  performWithMaxBackoff,
   Result(..),
-  RateManager
+  BackoffPolicy(..),
+  RateManager,
 ) where
 
 
@@ -21,6 +21,7 @@ import Control.Concurrent.STM.TVar (TVar, newTVar, readTVar, writeTVar,
   modifyTVar)
 import Control.Exception (finally)
 import Control.Monad (join)
+import Data.Default (Default, def)
 import Data.List (delete)
 
 
@@ -30,15 +31,35 @@ import Data.List (delete)
 -}
 data Result a b = Ok a | HitLimit b
 
+data BackoffPolicy = BackoffPolicy
+  { initialDelayMilliseconds :: Int
+  , maxExponent :: Int
+  }
+instance Default BackoffPolicy where
+  def = BackoffPolicy
+    { initialDelayMilliseconds = 10
+    , maxExponent = 11
+    }
 
--- | the time in microseconds of the backoff value (which is an exponent)
-time :: Int -> Int
-time backoff = 10000 * ((2 ^ backoff) - 1)
+-- | Calculate a new delay in microseconds. This is not a true exponential
+--   backoff as the delays are not random.
+--   https://en.wikipedia.org/wiki/Exponential_backoff
+time ::
+     Int
+     -- ^ the initial delay in milliseconds
+  -> Int
+     -- ^ the number of collisions that have occurred
+  -> Int
+time initialDelayMs collisions =
+    initialDelayMs * ((2 ^ collisions) - 1) * numMicrosecondsInMillisecond
+  where
+    numMicrosecondsInMillisecond :: Int
+    numMicrosecondsInMillisecond = 1000
 
 {- |
-  We default the maximum backoff exponent to 11, which translates to a 20.47
-  second delay. Specifying a higher maximum is useful for platforms that
-  enforce a long waiting-period when a rate-limit is exceeded.
+  We default the maximum backoff exponent to 11 and initial delay to 10ms, which
+  translates to a 20.47 second delay. Specifying a higher maximum is useful for
+  platforms that enforce a long waiting-period when a rate-limit is exceeded.
 
   backoff   time
   -------  -------
@@ -65,8 +86,6 @@ time backoff = 10000 * ((2 ^ backoff) - 1)
 
     19      1.45 (hours)
 -}
-defaultMaxBackoff :: Int
-defaultMaxBackoff = 11
 
 
 {- |
@@ -116,21 +135,15 @@ newRateManager = do
   the new job.
 -}
 performWith ::
-     RateManager
-  -> (b -> (Maybe Int, IO (Result a b)))
-  -> IO (Result a b)
-  -> IO a
-performWith = performWithMaxBackoff defaultMaxBackoff
-
-performWithMaxBackoff ::
-     Int
+     BackoffPolicy
   -> RateManager
   -> (b -> (Maybe Int, IO (Result a b)))
   -> IO (Result a b)
   -> IO a
-performWithMaxBackoff maxBackoff R {countT, throttledT} mkNextJob job = do
+performWith policy R{countT, throttledT} mkNextJob job = do
   jobId <- freshJobId countT
-  performJob throttledT jobId mkNextJob maxBackoff Nothing job
+  performJob policy throttledT jobId mkNextJob Nothing job
+
 
 freshJobId :: TVar Int -> IO Int
 freshJobId countT = atomically $ do
@@ -142,30 +155,32 @@ freshJobId countT = atomically $ do
   The same as `performWith`, but the original job is retried each time.
 -}
 perform ::
-     RateManager
+     BackoffPolicy
+  -> RateManager
   -> IO (Result a ())
   -> IO a
-perform r job = performWith r (const (Nothing, job)) job
+perform policy r job = performWith policy r (const (Nothing, job)) job
 
 performJob ::
-     TVar [Int]
+     BackoffPolicy
+  -> TVar [Int]
   -> Int
   -> (b -> (Maybe Int, IO (Result a b)))
-  -> Int
   -> Maybe Int
   -> IO (Result a b)
   -> IO a
-performJob throttledT jobId mkNextJob maxBackoff timeout job =
-  join . atomically $ do
-    throttled <- readTVar throttledT
-    case throttled of
-      [] -> return tryJob -- full speed ahead.
-      first:_ | first == jobId ->
-        -- we are first in line
-        return (untilSuccess 0 timeout job `finally` pop)
-      _ ->
-        -- we must wait
-        retry
+performJob policy@BackoffPolicy{initialDelayMilliseconds, maxExponent}
+  throttledT jobId mkNextJob timeout job =
+    join . atomically $ do
+      throttled <- readTVar throttledT
+      case throttled of
+        [] -> return tryJob -- full speed ahead.
+        first:_ | first == jobId ->
+          -- we are first in line
+          return (untilSuccess 0 timeout job `finally` pop)
+        _ ->
+          -- we must wait
+          retry
   where
     tryJob = do
       result <- job
@@ -173,21 +188,23 @@ performJob throttledT jobId mkNextJob maxBackoff timeout job =
         Ok val -> return val
         HitLimit limitResponse -> do
           atomically $ modifyTVar throttledT (++ [jobId])
-          uncurry (performJob throttledT jobId mkNextJob maxBackoff) $
+          uncurry (performJob policy throttledT jobId mkNextJob) $
             mkNextJob limitResponse
 
-    untilSuccess backoff timeout' job' = do
+    untilSuccess collisions timeout' job' = do
       case timeout' of
-        Nothing -> threadDelay (time backoff)
-        Just milliSeconds -> threadDelay (1000 * milliSeconds)
+        Nothing -> threadDelay (time initialDelayMilliseconds collisions)
+        Just milliseconds -> threadDelay (1000 * milliseconds)
       result <- job'
       case result of
         Ok val -> return val
         HitLimit limitResponse ->
-          uncurry (untilSuccess $ newBackoff backoff) (mkNextJob limitResponse)
+          uncurry (untilSuccess $ newExponent collisions)
+            (mkNextJob limitResponse)
 
-    newBackoff backoff
-      | backoff >= maxBackoff = backoff -- don't go crazy with the backoff.
-      | otherwise = backoff + 1
+    newExponent collisions
+      | collisions >= maxExponent = collisions
+        -- ^ don't go crazy with the backoff exponent.
+      | otherwise = collisions + 1
 
     pop = atomically $ modifyTVar throttledT (delete jobId)
