@@ -204,7 +204,7 @@ performJob policy@BackoffPolicy{initialDelayMilliseconds, maxExponent}
 
     newExponent collisions
       | collisions >= maxExponent = collisions
-        -- ^ don't go crazy with the backoff exponent.
+        -- don't go crazy with the backoff exponent.
       | otherwise = collisions + 1
 
     pop = atomically $ modifyTVar throttledT (delete jobId)

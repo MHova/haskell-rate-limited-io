@@ -1,5 +1,5 @@
 name:                rate-limited-io
-version:             0.5.0.0
+version:             0.5.0.1
 synopsis:
   A library that facilitates graceful handling of IO actions which are rate limited by some external party (e.g. connecting to the Twitter api).    
 description:         
